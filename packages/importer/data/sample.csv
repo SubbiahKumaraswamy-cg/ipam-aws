@@ -1,0 +1,8 @@
+Environment,Region,ISO,COUNTRY,CLOUD SPACE,MASK,Current Range,Status,Remarks
+AWS,EUROPE,DE,Germany,10.20.0.0,/16,10.20.0.0/24,Used,Primary landing zone
+AWS,EUROPE,FR,France,10.21.0.0,255.255.0.0,,Allocated,
+AWS,CAMEAT,AE,United Arab Emirates,10.30.0.0,/16,,Allocated,
+AWS,ASIA,SG,Singapore,10.40.0.0,/16,10.40.0.0/22,Used,
+AWS,LATAM,BR,Brazil,10.50.0.0,/16,,Allocated,
+Azure,AMERICA,US,United States,10.60.0.0,/14,,Allocated,
+Azure,COMPASS GROUP,GL,Global Shared Services,10.70.0.0,/16,10.70.0.0/20,Used,Shared platform

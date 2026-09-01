@@ -1,0 +1,39 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/app.ts",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "**/*.d.ts",
+      "**/*.js",
+      "tsconfig.json",
+      "package*.json",
+      "node_modules"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
+    "@aws-cdk/aws-ec2:restrictDefaultSecurityGroup": true,
+    "@aws-cdk/aws-rds:lowercaseDbIdentifier": true,
+
+    "//": "----- Application settings — override with -c key=value -----",
+    "appName": "ipam",
+    "//dbInstanceClass": "RDS instance size. t4g.micro is the cheapest option.",
+    "dbInstanceClass": "t4g.micro",
+    "//dbMultiAz": "Set to true for production high availability.",
+    "dbMultiAz": "false",
+    "//dbAllocatedStorage": "Storage in GiB.",
+    "dbAllocatedStorage": "20",
+    "//adminEmail": "Email address of the first Admin user. Required on first deploy.",
+    "adminEmail": "",
+    "//cognitoDomainPrefix": "Globally unique prefix for the Cognito hosted UI domain.",
+    "cognitoDomainPrefix": "",
+    "//useNatGateway": "true routes Lambda via NAT; false (default) uses VPC endpoints.",
+    "useNatGateway": "false"
+  }
+}

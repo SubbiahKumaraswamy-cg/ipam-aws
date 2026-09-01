@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+packages/web/dist/
+packages/api/dist/
+packages/shared/dist/
+packages/importer/dist/
+
+# CDK
+packages/infra/cdk.out/
+cdk.out/
+*.d.ts.map
+# The CDK app runs via ts-node; `tsc` emits JS beside the sources, which we
+# never want to commit.
+packages/infra/bin/*.js
+packages/infra/bin/*.d.ts
+packages/infra/lib/*.js
+packages/infra/lib/*.d.ts
+
+# Safety net: compiled output must never land beside TypeScript sources.
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/web/src/**/*.d.ts
+!packages/web/src/vite-env.d.ts
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+aws-exports.js
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Test / coverage
+coverage/
+
+# Local seed data (may contain real IP allocations)
+packages/importer/data/*.xlsx
+packages/importer/data/*.csv
+!packages/importer/data/sample.csv

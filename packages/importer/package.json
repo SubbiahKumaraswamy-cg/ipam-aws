@@ -1,0 +1,23 @@
+{
+  "name": "@ipam/importer",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "bin": {
+    "ipam-import": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "import": "node dist/index.js"
+  },
+  "dependencies": {
+    "@ipam/shared": "*",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.9",
+    "typescript": "^5.7.2"
+  },
+  "license": "UNLICENSED"
+}
