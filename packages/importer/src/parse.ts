@@ -19,18 +19,21 @@
 
 import ExcelJS from 'exceljs';
 import type {
-  CloudAllocationInput,
+  CountryInput,
+  MasterSubnetInput,
   AzureSubscriptionInput,
   SubnetPlanEntryInput,
-  Environment,
   RegionGroup,
   AzurePortalType,
-  AllocationStatus,
+  ProviderLocation,
 } from '@ipam/shared';
 import { toCidrString } from '@ipam/shared';
 
 export interface ParseResult {
-  allocations: CloudAllocationInput[];
+  /** Countries derived from the ISO / COUNTRY columns. */
+  countries: CountryInput[];
+  /** Each country's CLOUD SPACE becomes a master subnet. */
+  masters: MasterSubnetInput[];
   subscriptions: AzureSubscriptionInput[];
   planEntries: SubnetPlanEntryInput[];
   warnings: string[];
@@ -38,7 +41,7 @@ export interface ParseResult {
   sheets: {
     name: string;
     kind: string;
-    allocations: number;
+    masters: number;
     subscriptions: number;
     planEntries: number;
     skipped: number;
@@ -130,22 +133,24 @@ export function normaliseRegion(label: string): RegionGroup | null {
     return 'CAMEAT';
   }
   if (key.includes('LATAM') || key.includes('LATIN AMERICA')) return 'LATAM';
-  if (key.includes('COMPASS')) return 'COMPASS GROUP';
+  if (key.includes('COMPASS') || key === 'GROUP') return 'GROUP';
   // Check America after LATAM so "LATIN AMERICA" is not swallowed here.
   // Note: deliberately no short aliases such as "US" or "NA" — those collide
   // with ISO country codes in the data rows.
-  if (key.includes('AMERICA')) return 'AMERICA';
+  if (key.includes('AMERICA')) return 'NORTH AMERICA';
   if (key.includes('ASIA') || key.includes('APAC') || key.includes('PACIFIC')) {
-    return 'ASIA';
+    return 'APAC';
   }
   return null;
 }
 
-/** Infer the cloud environment from a sheet name. */
-export function environmentFromSheetName(name: string): Environment | null {
+/** Infer the cloud provider from a sheet name. */
+export function providerFromSheetName(name: string): ProviderLocation | null {
   const key = normaliseHeader(name);
   if (key.includes('AWS')) return 'AWS';
   if (key.includes('AZURE')) return 'Azure';
+  if (key.includes('GCP') || key.includes('GOOGLE')) return 'GCP';
+  if (key.includes('ON-PREM') || key.includes('ON PREM')) return 'On-prem';
   return null;
 }
 
@@ -310,7 +315,8 @@ function findRegionLabel(
 /* -------------------------------------------------------------------------- */
 
 interface SheetOutcome {
-  allocations: CloudAllocationInput[];
+  countries: CountryInput[];
+  masters: MasterSubnetInput[];
   subscriptions: AzureSubscriptionInput[];
   planEntries: SubnetPlanEntryInput[];
   warnings: string[];
@@ -318,15 +324,21 @@ interface SheetOutcome {
   kind: string;
 }
 
-/** Parse the country allocation blocks on an AWS/Azure sheet. */
+/**
+ * Parse the country allocation blocks on a provider sheet.
+ *
+ * Each row yields a country (ISO + name + region) and a master subnet built
+ * from CLOUD SPACE + MASK. `Current Range` is preserved in the remarks because
+ * the revised model derives usage from child subnets instead.
+ */
 function parseAllocationSheet(
   grid: string[][],
   sheetName: string,
-  environment: Environment,
-  deriveStatus: (row: { currentRange: string | null }) => AllocationStatus,
+  provider: ProviderLocation,
 ): SheetOutcome {
   const warnings: string[] = [];
-  const allocations: CloudAllocationInput[] = [];
+  const countries: CountryInput[] = [];
+  const masters: MasterSubnetInput[] = [];
   let skipped = 0;
 
   const blocks = findAllocationBlocks(grid);
@@ -401,29 +413,51 @@ function parseAllocationSheet(
         );
       }
 
-      allocations.push({
-        environment,
+      const isoCode = iso ? iso.toUpperCase().slice(0, 8) : null;
+
+      if (isoCode) {
+        countries.push({
+          iso: isoCode,
+          name: country || isoCode,
+          regionGroup: block.region,
+          active: true,
+          remarks: null,
+          attributes: {},
+        });
+      }
+
+      // Combine the separate network and mask columns into one CIDR. The
+      // prevailing size in this plan is /16, used when the mask is absent.
+      const combined = cidr ?? `${cloudSpace}/${(mask || '16').replace(/^\//, '')}`;
+
+      const notes = [
+        remarks || null,
+        normalisedRange ? `Current range from spreadsheet: ${normalisedRange}` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      masters.push({
+        name: country || isoCode || combined,
+        cidr: combined,
         regionGroup: block.region,
-        iso: iso ? iso.toUpperCase().slice(0, 8) : null,
-        country: country || null,
-        cloudSpace,
-        // Default to /16, the prevailing size in this plan, when absent.
-        mask: mask || '/16',
-        currentRange: normalisedRange,
-        status: deriveStatus({ currentRange: normalisedRange }),
-        remarks: remarks || null,
-        tags: { sourceSheet: sheetName },
+        countryIso: isoCode,
+        providerLocation: provider,
+        description: `Imported from sheet "${sheetName}"`,
+        remarks: notes || null,
+        attributes: {},
       });
     }
   }
 
   return {
-    allocations,
+    countries,
+    masters,
     subscriptions: [],
     planEntries: [],
     warnings,
     skipped,
-    kind: `${environment} allocations (${blocks.length} region block(s))`,
+    kind: `${provider} master subnets (${blocks.length} region block(s))`,
   };
 }
 
@@ -542,7 +576,8 @@ function parseSubnetPlanSheet(
 
   if (headerRow === -1) {
     return {
-      allocations: [],
+      countries: [],
+      masters: [],
       subscriptions: [],
       planEntries: [],
       warnings: [
@@ -604,7 +639,8 @@ function parseSubnetPlanSheet(
   }
 
   return {
-    allocations: [],
+    countries: [],
+    masters: [],
     subscriptions: [],
     planEntries,
     warnings,
@@ -617,31 +653,18 @@ function parseSubnetPlanSheet(
 /* Workbook entry point                                                       */
 /* -------------------------------------------------------------------------- */
 
-export interface ParseOptions {
-  /**
-   * How to set the initial lifecycle status. By default a row that already has
-   * a Current Range is treated as `Used`, otherwise `Allocated`.
-   */
-  defaultStatus?: AllocationStatus;
-}
-
-export async function parseWorkbook(
-  filePath: string,
-  options: ParseOptions = {},
-): Promise<ParseResult> {
+export async function parseWorkbook(filePath: string): Promise<ParseResult> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
 
   const result: ParseResult = {
-    allocations: [],
+    countries: [],
+    masters: [],
     subscriptions: [],
     planEntries: [],
     warnings: [],
     sheets: [],
   };
-
-  const deriveStatus = (row: { currentRange: string | null }): AllocationStatus =>
-    options.defaultStatus ?? (row.currentRange ? 'Used' : 'Allocated');
 
   workbook.eachSheet((sheet) => {
     if (sheet.state === 'hidden' || sheet.state === 'veryHidden') {
@@ -650,25 +673,22 @@ export async function parseWorkbook(
     }
 
     const grid = buildGrid(sheet);
-    const environment = environmentFromSheetName(sheet.name);
+    const provider = providerFromSheetName(sheet.name);
 
     let outcome: SheetOutcome;
 
-    if (environment) {
-      outcome = parseAllocationSheet(grid, sheet.name, environment, deriveStatus);
+    if (provider) {
+      outcome = parseAllocationSheet(grid, sheet.name, provider);
 
       // Azure sheets may also carry subscription -> address space tables.
-      if (environment === 'Azure') {
+      if (provider === 'Azure') {
         const subs = parseSubscriptionTables(grid, sheet.name);
         outcome.subscriptions = subs.subscriptions;
         outcome.warnings.push(...subs.warnings);
       }
 
       // A sheet named for a cloud might still be the subnet plan.
-      if (
-        outcome.allocations.length === 0 &&
-        outcome.subscriptions.length === 0
-      ) {
+      if (outcome.masters.length === 0 && outcome.subscriptions.length === 0) {
         const plan = parseSubnetPlanSheet(grid, sheet.name);
         if (plan.planEntries.length > 0) outcome = plan;
       }
@@ -679,7 +699,8 @@ export async function parseWorkbook(
         const subs = parseSubscriptionTables(grid, sheet.name);
         if (subs.subscriptions.length > 0) {
           outcome = {
-            allocations: [],
+            countries: [],
+            masters: [],
             subscriptions: subs.subscriptions,
             planEntries: [],
             warnings: subs.warnings,
@@ -690,18 +711,27 @@ export async function parseWorkbook(
       }
     }
 
-    result.allocations.push(...outcome.allocations);
+    result.countries.push(...outcome.countries);
+    result.masters.push(...outcome.masters);
     result.subscriptions.push(...outcome.subscriptions);
     result.planEntries.push(...outcome.planEntries);
     result.warnings.push(...outcome.warnings);
     result.sheets.push({
       name: sheet.name,
       kind: outcome.kind,
-      allocations: outcome.allocations.length,
+      masters: outcome.masters.length,
       subscriptions: outcome.subscriptions.length,
       planEntries: outcome.planEntries.length,
       skipped: outcome.skipped,
     });
+  });
+
+  // A country appears on every provider sheet; keep one row per ISO.
+  const seenCountries = new Set<string>();
+  result.countries = result.countries.filter((c) => {
+    if (seenCountries.has(c.iso)) return false;
+    seenCountries.add(c.iso);
+    return true;
   });
 
   // De-duplicate subscriptions, which can repeat across sheets.

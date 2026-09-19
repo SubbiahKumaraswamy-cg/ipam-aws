@@ -248,19 +248,27 @@ export class IpamStack extends Stack {
       enableTokenRevocation: true,
     });
 
-    // Groups drive authorisation: only Editor and Admin may modify data.
+    // Groups drive authorisation. Highest privilege wins when a user is in
+    // more than one group.
     const groups: Record<string, { description: string; precedence: number }> = {
       Admin: {
-        description: 'Full access: modify allocations, view the audit trail.',
+        description:
+          'Full access: all countries, custom columns, country owners and the audit trail.',
         precedence: 1,
       },
-      Editor: {
-        description: 'Can add, edit and delete allocation rows.',
+      Author: {
+        description:
+          'Global team: may add, edit and delete subnets for every country.',
         precedence: 2,
       },
-      Viewer: {
-        description: 'Read-only access to allocations and dashboards.',
+      CountryOwner: {
+        description:
+          'May edit only the countries assigned to them on the Admin page.',
         precedence: 3,
+      },
+      Viewer: {
+        description: 'Read-only access to all subnets and dashboards.',
+        precedence: 4,
       },
     };
 
@@ -505,11 +513,19 @@ export class IpamStack extends Stack {
       description: 'Create an additional user',
     });
 
-    new CfnOutput(this, 'GrantEditorCommand', {
+    new CfnOutput(this, 'GrantAuthorCommand', {
       value:
         `aws cognito-idp admin-add-user-to-group --user-pool-id ${userPool.userPoolId}` +
-        ' --username USER@EXAMPLE.COM --group-name Editor',
-      description: 'Grant a user permission to modify rows',
+        ' --username USER@EXAMPLE.COM --group-name Author',
+      description: 'Grant a user global edit rights (the 5-person global team)',
+    });
+
+    new CfnOutput(this, 'GrantCountryOwnerCommand', {
+      value:
+        `aws cognito-idp admin-add-user-to-group --user-pool-id ${userPool.userPoolId}` +
+        ' --username USER@EXAMPLE.COM --group-name CountryOwner',
+      description:
+        'Make a user a country owner, then assign their countries on the Admin page',
     });
   }
 }

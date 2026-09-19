@@ -1,34 +1,59 @@
 /**
- * Lambda entry point. Implements a small REST router over API Gateway
- * HTTP API events (payload format 2.0).
+ * Lambda entry point — a small REST router over API Gateway HTTP API events.
+ *
+ * Authorisation summary
+ *   Reads               any authenticated user
+ *   Child/master writes Author, Admin, or a CountryOwner for that country
+ *   Countries           Author or Admin
+ *   Custom fields       Admin
+ *   Country owners      Admin
+ *   Audit               Admin
  *
  * Routes
- *   GET    /health
+ *   GET    /health                          (public)
  *   GET    /me
  *   GET    /dashboard
- *   GET    /allocations                       ?environment&regionGroup&status&iso&search&within
- *   POST   /allocations                       (Editor+)
- *   GET    /allocations/export                -> CSV
- *   POST   /allocations/import                (Editor+) CSV or JSON array
- *   GET    /allocations/overlaps              ?cidr&excludeId
- *   GET    /allocations/{id}
- *   PUT    /allocations/{id}                  (Editor+)
- *   DELETE /allocations/{id}                  (Editor+)
- *   GET    /azure-subscriptions               ?portalType&regionGroup&search
- *   POST   /azure-subscriptions               (Editor+)
- *   GET    /azure-subscriptions/export        -> CSV
- *   POST   /azure-subscriptions/import        (Editor+)
- *   GET    /azure-subscriptions/{id}
- *   PUT    /azure-subscriptions/{id}          (Editor+)
- *   DELETE /azure-subscriptions/{id}          (Editor+)
- *   GET    /subnet-plan                       ?search&within
- *   POST   /subnet-plan                       (Editor+)
- *   GET    /subnet-plan/export                -> CSV
- *   POST   /subnet-plan/import                (Editor+)
- *   GET    /subnet-plan/{id}
- *   PUT    /subnet-plan/{id}                  (Editor+)
- *   DELETE /subnet-plan/{id}                  (Editor+)
- *   GET    /audit                             (Admin) ?limit
+ *
+ *   GET    /countries                       ?regionGroup&search&activeOnly
+ *   POST   /countries                       (Author+)
+ *   GET    /countries/export                -> CSV
+ *   POST   /countries/import                (Author+)
+ *   GET    /countries/{iso}
+ *   PUT    /countries/{iso}                 (Author+)
+ *   DELETE /countries/{iso}                 (Author+)
+ *
+ *   GET    /master-subnets                  ?regionGroup&countryIso&providerLocation&search&within
+ *   POST   /master-subnets                  (country-scoped)
+ *   GET    /master-subnets/export           -> CSV
+ *   GET    /master-subnets/overlaps         ?cidr&excludeId
+ *   GET    /master-subnets/{id}
+ *   PUT    /master-subnets/{id}             (country-scoped)
+ *   DELETE /master-subnets/{id}             (country-scoped)
+ *   GET    /master-subnets/{id}/free-space  ?prefix
+ *   GET    /master-subnets/{id}/children
+ *
+ *   GET    /child-subnets                   ?masterSubnetId&regionGroup&countryIso&status&environment&providerLocation&technicalOwner&requestorName&search&within
+ *   POST   /child-subnets                   (country-scoped)
+ *   GET    /child-subnets/export            -> CSV
+ *   GET    /child-subnets/overlaps          ?cidr&excludeId
+ *   GET    /child-subnets/{id}
+ *   PUT    /child-subnets/{id}              (country-scoped)
+ *   DELETE /child-subnets/{id}              (country-scoped)
+ *   POST   /child-subnets/{id}/release      (country-scoped)
+ *
+ *   GET    /custom-fields                   ?entity&includeInactive
+ *   POST   /custom-fields                   (Admin)
+ *   PUT    /custom-fields/{id}              (Admin)
+ *   DELETE /custom-fields/{id}              (Admin)
+ *
+ *   GET    /country-owners                  (Admin) ?userEmail&countryIso
+ *   POST   /country-owners                  (Admin)
+ *   PUT    /country-owners                  (Admin) replace one user's set
+ *   DELETE /country-owners/{id}             (Admin)
+ *
+ *   GET    /azure-subscriptions ... (unchanged)
+ *   GET    /subnet-plan ...        (unchanged)
+ *   GET    /audit                           (Admin)
  */
 
 import type {
@@ -36,11 +61,22 @@ import type {
   APIGatewayProxyResultV2,
 } from 'aws-lambda';
 import type {
-  CloudAllocationInput,
+  AuthenticatedUser,
+  CountryInput,
+  MasterSubnetInput,
+  ChildSubnetInput,
+  CustomFieldInput,
+  CountryOwnerInput,
   AzureSubscriptionInput,
   SubnetPlanEntryInput,
 } from '@ipam/shared';
-import { authenticate, requireEditor, requireAdmin, HttpError } from './auth';
+import {
+  authenticate,
+  requireAdmin,
+  requireGlobalAuthor,
+  requireCountryWrite,
+  HttpError,
+} from './auth';
 import {
   ok,
   created,
@@ -51,7 +87,11 @@ import {
   queryParam,
   json,
 } from './http';
-import * as allocations from './repositories/allocations';
+import * as countries from './repositories/countries';
+import * as masters from './repositories/masterSubnets';
+import * as children from './repositories/childSubnets';
+import * as customFields from './repositories/customFields';
+import * as owners from './repositories/countryOwners';
 import * as subscriptions from './repositories/azureSubscriptions';
 import * as plan from './repositories/subnetPlan';
 import { getDashboardSummary } from './repositories/dashboard';
@@ -63,45 +103,48 @@ export async function handler(
 ): Promise<APIGatewayProxyResultV2> {
   const method = event.requestContext?.http?.method ?? 'GET';
   const rawPath = event.requestContext?.http?.path ?? event.rawPath ?? '/';
-  // Strip a stage prefix if the API is deployed with one.
   const path = rawPath.replace(/\/+$/, '') || '/';
 
   try {
-    // CORS preflight — no auth required.
     if (method === 'OPTIONS') return noContent();
 
-    // Health check is unauthenticated so infrastructure probes work.
+    // Unauthenticated so infrastructure probes work.
     if (method === 'GET' && path.endsWith('/health')) {
       return ok({ status: 'ok', time: new Date().toISOString() });
     }
 
     const user = await authenticate(event);
     const segments = path.split('/').filter(Boolean);
+    const root = segments[0];
 
-    if (method === 'GET' && segments[0] === 'me') {
-      return ok(user);
-    }
-
-    if (method === 'GET' && segments[0] === 'dashboard') {
+    if (method === 'GET' && root === 'me') return ok(user);
+    if (method === 'GET' && root === 'dashboard') {
       return ok(await getDashboardSummary());
     }
 
-    if (segments[0] === 'allocations') {
-      return await routeAllocations(event, method, segments, user.email, user);
-    }
-
-    if (segments[0] === 'azure-subscriptions') {
-      return await routeSubscriptions(event, method, segments, user.email, user);
-    }
-
-    if (segments[0] === 'subnet-plan') {
-      return await routePlan(event, method, segments, user.email, user);
-    }
-
-    if (method === 'GET' && segments[0] === 'audit') {
-      requireAdmin(user);
-      const limit = Number(queryParam(event, 'limit') ?? 200);
-      return ok(await listAudit(Number.isFinite(limit) ? limit : 200));
+    switch (root) {
+      case 'countries':
+        return await routeCountries(event, method, segments, user);
+      case 'master-subnets':
+        return await routeMasters(event, method, segments, user);
+      case 'child-subnets':
+        return await routeChildren(event, method, segments, user);
+      case 'custom-fields':
+        return await routeCustomFields(event, method, segments, user);
+      case 'country-owners':
+        return await routeCountryOwners(event, method, segments, user);
+      case 'azure-subscriptions':
+        return await routeSubscriptions(event, method, segments, user);
+      case 'subnet-plan':
+        return await routePlan(event, method, segments, user);
+      case 'audit': {
+        if (method !== 'GET') break;
+        requireAdmin(user);
+        const limit = Number(queryParam(event, 'limit') ?? 200);
+        return ok(await listAudit(Number.isFinite(limit) ? limit : 200));
+      }
+      default:
+        break;
     }
 
     return json(404, { error: `No route for ${method} ${path}` });
@@ -110,103 +153,87 @@ export async function handler(
   }
 }
 
-type User = Awaited<ReturnType<typeof authenticate>>;
-
 /* -------------------------------------------------------------------------- */
-/* /allocations                                                               */
+/* /countries                                                                 */
 /* -------------------------------------------------------------------------- */
 
-async function routeAllocations(
+async function routeCountries(
   event: APIGatewayProxyEventV2,
   method: string,
   segments: string[],
-  actor: string,
-  user: User,
+  user: AuthenticatedUser,
 ): Promise<APIGatewayProxyResultV2> {
   const sub = segments[1];
 
   if (method === 'GET' && sub === 'export') {
-    const rows = await allocations.listAllocations(readAllocationFilters(event));
-    const csv = toCsv(rows as unknown as Record<string, unknown>[], [
-      { key: 'environment', header: 'Environment' },
-      { key: 'regionGroup', header: 'Region' },
-      { key: 'iso', header: 'ISO' },
-      { key: 'country', header: 'COUNTRY' },
-      { key: 'cloudSpace', header: 'CLOUD SPACE' },
-      { key: 'mask', header: 'MASK' },
-      { key: 'cidr', header: 'CIDR' },
-      { key: 'currentRange', header: 'Current Range' },
-      { key: 'status', header: 'Status' },
-      { key: 'remarks', header: 'Remarks' },
-    ]);
-    return text(200, csv, 'text/csv; charset=utf-8', 'allocations.csv');
-  }
-
-  if (method === 'POST' && sub === 'import') {
-    requireEditor(user);
-    const inputs = parseAllocationImport(event);
-    if (inputs.length === 0) {
-      throw new HttpError(400, 'No rows found in the import payload.');
-    }
-    const result = await allocations.bulkUpsertAllocations(inputs, actor);
-    return ok({ ...result, total: inputs.length });
-  }
-
-  if (method === 'GET' && sub === 'overlaps') {
-    const cidr = queryParam(event, 'cidr');
-    if (!cidr) throw new HttpError(400, 'Query parameter "cidr" is required.');
-    return ok(
-      await allocations.findOverlaps(cidr, queryParam(event, 'excludeId')),
+    const rows = await countries.listCountries(readCountryFilters(event));
+    return text(
+      200,
+      toCsv(rows as unknown as Record<string, unknown>[], [
+        { key: 'iso', header: 'ISO' },
+        { key: 'name', header: 'Country' },
+        { key: 'regionGroup', header: 'Region' },
+        { key: 'active', header: 'Active' },
+        { key: 'remarks', header: 'Remarks' },
+      ]),
+      'text/csv; charset=utf-8',
+      'countries.csv',
     );
   }
 
-  if (method === 'GET' && !sub) {
-    return ok(await allocations.listAllocations(readAllocationFilters(event)));
+  if (method === 'POST' && sub === 'import') {
+    requireGlobalAuthor(user);
+    const rows = parseCountryImport(event);
+    if (rows.length === 0) throw new HttpError(400, 'No rows found to import.');
+    const result = await countries.bulkUpsertCountries(rows, user.email);
+    return ok({ ...result, total: rows.length });
   }
 
-  if (method === 'POST' && !sub) {
-    requireEditor(user);
-    const body = parseBody<CloudAllocationInput>(event);
-    return created(await allocations.createAllocation(body, actor));
-  }
-
-  if (sub) {
-    if (method === 'GET') return ok(await allocations.getAllocation(sub));
+  if (!sub) {
+    if (method === 'GET') {
+      return ok(await countries.listCountries(readCountryFilters(event)));
+    }
+    if (method === 'POST') {
+      requireGlobalAuthor(user);
+      const body = parseBody<CountryInput>(event);
+      body.attributes = await customFields.sanitiseAttributes(
+        'country',
+        body.attributes,
+      );
+      return created(await countries.createCountry(body, user.email));
+    }
+  } else {
+    if (method === 'GET') return ok(await countries.getCountry(sub));
     if (method === 'PUT' || method === 'PATCH') {
-      requireEditor(user);
-      const body = parseBody<CloudAllocationInput>(event);
-      return ok(await allocations.updateAllocation(sub, body, actor));
+      requireGlobalAuthor(user);
+      const body = parseBody<CountryInput>(event);
+      body.attributes = await customFields.sanitiseAttributes(
+        'country',
+        body.attributes,
+      );
+      return ok(await countries.updateCountry(sub, body, user.email));
     }
     if (method === 'DELETE') {
-      requireEditor(user);
-      await allocations.deleteAllocation(sub, actor);
+      requireGlobalAuthor(user);
+      await countries.deleteCountry(sub, user.email);
       return noContent();
     }
   }
 
-  return json(405, { error: `Method ${method} not allowed on /allocations.` });
+  return json(405, { error: `Method ${method} not allowed on /countries.` });
 }
 
-function readAllocationFilters(
+function readCountryFilters(
   event: APIGatewayProxyEventV2,
-): allocations.AllocationFilters {
+): countries.CountryFilters {
   return {
-    environment: queryParam(event, 'environment'),
     regionGroup: queryParam(event, 'regionGroup'),
-    status: queryParam(event, 'status'),
-    iso: queryParam(event, 'iso'),
     search: queryParam(event, 'search'),
-    within: queryParam(event, 'within'),
+    activeOnly: queryParam(event, 'activeOnly'),
   };
 }
 
-/**
- * Accept either a JSON array of allocation inputs or raw CSV whose headers
- * match the spreadsheet columns (ISO, COUNTRY, CLOUD SPACE, MASK, ...).
- */
-function parseAllocationImport(
-  event: APIGatewayProxyEventV2,
-): CloudAllocationInput[] {
+function parseCountryImport(event: APIGatewayProxyEventV2): CountryInput[] {
   const contentType =
     event.headers?.['content-type'] ?? event.headers?.['Content-Type'] ?? '';
 
@@ -214,49 +241,379 @@ function parseAllocationImport(
     const raw = event.isBase64Encoded
       ? Buffer.from(event.body ?? '', 'base64').toString('utf8')
       : (event.body ?? '');
-    const records = parseCsv(raw);
-    const defaultEnvironment = queryParam(event, 'environment');
-
-    return records.map((record) => {
-      const environment =
-        pick(record, ['Environment', 'Cloud']) ?? defaultEnvironment;
-      if (environment !== 'AWS' && environment !== 'Azure') {
-        throw new HttpError(
-          400,
-          'Each CSV row needs an Environment of "AWS" or "Azure" ' +
-            '(or pass ?environment=AWS on the request).',
-        );
-      }
-      const regionGroup = pick(record, ['Region', 'Region Group', 'RegionGroup']);
-      if (!regionGroup) {
-        throw new HttpError(400, 'Each CSV row needs a Region value.');
-      }
-      const status = pick(record, ['Status']) ?? 'Allocated';
-
+    return parseCsv(raw).map((record) => {
+      const activeRaw = pick(record, ['Active', 'Enabled']);
       return {
-        environment,
-        regionGroup,
-        iso: pick(record, ['ISO', 'ISO Code']),
-        country: pick(record, ['COUNTRY', 'Country', 'Market']),
-        cloudSpace: pick(record, ['CLOUD SPACE', 'CloudSpace', 'Network']) ?? '',
-        mask: pick(record, ['MASK', 'Mask', 'Subnet Mask']) ?? '',
-        cidr: pick(record, ['CIDR']),
-        currentRange: pick(record, ['Current Range', 'CurrentRange']),
-        status,
-        remarks: pick(record, ['Remarks', 'Notes', 'Comment']),
-        tags: {},
-      } as CloudAllocationInput;
+        iso: pick(record, ['ISO', 'ISO Code', 'Code']) ?? '',
+        name: pick(record, ['Country', 'Name', 'Market']) ?? '',
+        regionGroup: (pick(record, ['Region', 'Region Group']) ?? '') as
+          CountryInput['regionGroup'],
+        active: activeRaw === null ? true : /^(true|yes|1|y)$/i.test(activeRaw),
+        remarks: pick(record, ['Remarks', 'Notes']),
+        attributes: {},
+      };
     });
   }
 
-  const body = parseBody<CloudAllocationInput[] | { rows: CloudAllocationInput[] }>(
-    event,
-  );
+  const body = parseBody<CountryInput[] | { rows: CountryInput[] }>(event);
   const rows = Array.isArray(body) ? body : body.rows;
   if (!Array.isArray(rows)) {
     throw new HttpError(400, 'Expected a JSON array of rows, or {"rows": [...]}.');
   }
   return rows;
+}
+
+/* -------------------------------------------------------------------------- */
+/* /master-subnets                                                            */
+/* -------------------------------------------------------------------------- */
+
+async function routeMasters(
+  event: APIGatewayProxyEventV2,
+  method: string,
+  segments: string[],
+  user: AuthenticatedUser,
+): Promise<APIGatewayProxyResultV2> {
+  const sub = segments[1];
+  const action = segments[2];
+
+  if (method === 'GET' && sub === 'export') {
+    const rows = await masters.listMasters(readMasterFilters(event));
+    return text(
+      200,
+      toCsv(rows as unknown as Record<string, unknown>[], [
+        { key: 'cidr', header: 'Master Subnet' },
+        { key: 'name', header: 'Name' },
+        { key: 'regionGroup', header: 'Region' },
+        { key: 'countryIso', header: 'ISO' },
+        { key: 'countryName', header: 'Country' },
+        { key: 'providerLocation', header: 'Provider / Location' },
+        { key: 'totalAddresses', header: 'Total Addresses' },
+        { key: 'allocatedAddresses', header: 'Allocated' },
+        { key: 'availableAddresses', header: 'Available' },
+        { key: 'totalChildren', header: 'Child Subnets' },
+        { key: 'description', header: 'Description' },
+        { key: 'remarks', header: 'Remarks' },
+      ]),
+      'text/csv; charset=utf-8',
+      'master-subnets.csv',
+    );
+  }
+
+  if (method === 'GET' && sub === 'overlaps') {
+    const cidr = queryParam(event, 'cidr');
+    if (!cidr) throw new HttpError(400, 'Query parameter "cidr" is required.');
+    return ok(
+      await masters.findOverlappingMasters(cidr, queryParam(event, 'excludeId')),
+    );
+  }
+
+  if (method === 'POST' && sub === 'import') {
+    // Imports span countries, so they need global rights.
+    requireGlobalAuthor(user);
+    const rows = parseMasterImport(event);
+    if (rows.length === 0) throw new HttpError(400, 'No rows found to import.');
+    const result = await masters.bulkUpsertMasters(rows, user.email);
+    return ok({ ...result, total: rows.length });
+  }
+
+  if (!sub) {
+    if (method === 'GET') {
+      return ok(await masters.listMasters(readMasterFilters(event)));
+    }
+    if (method === 'POST') {
+      const body = parseBody<MasterSubnetInput>(event);
+      requireCountryWrite(user, body.countryIso);
+      body.attributes = await customFields.sanitiseAttributes(
+        'master_subnet',
+        body.attributes,
+      );
+      return created(await masters.createMaster(body, user.email));
+    }
+  } else if (action === 'free-space' && method === 'GET') {
+    const prefixRaw = queryParam(event, 'prefix');
+    const prefix = prefixRaw === undefined ? undefined : Number(prefixRaw);
+    if (prefix !== undefined && !Number.isFinite(prefix)) {
+      throw new HttpError(400, 'prefix must be a number.');
+    }
+    return ok(await masters.findFreeSpace(sub, prefix));
+  } else if (action === 'children' && method === 'GET') {
+    return ok(await children.listChildren({ masterSubnetId: sub }));
+  } else if (!action) {
+    if (method === 'GET') return ok(await masters.getMaster(sub));
+    if (method === 'PUT' || method === 'PATCH') {
+      const existing = await masters.getMaster(sub);
+      const body = parseBody<MasterSubnetInput>(event);
+      // Writable in both the current and the target country.
+      requireCountryWrite(user, existing.countryIso);
+      requireCountryWrite(user, body.countryIso);
+      body.attributes = await customFields.sanitiseAttributes(
+        'master_subnet',
+        body.attributes,
+      );
+      return ok(await masters.updateMaster(sub, body, user.email));
+    }
+    if (method === 'DELETE') {
+      const existing = await masters.getMaster(sub);
+      requireCountryWrite(user, existing.countryIso);
+      await masters.deleteMaster(sub, user.email);
+      return noContent();
+    }
+  }
+
+  return json(405, { error: `Method ${method} not allowed on /master-subnets.` });
+}
+
+function readMasterFilters(
+  event: APIGatewayProxyEventV2,
+): masters.MasterFilters {
+  return {
+    regionGroup: queryParam(event, 'regionGroup'),
+    countryIso: queryParam(event, 'countryIso'),
+    providerLocation: queryParam(event, 'providerLocation'),
+    search: queryParam(event, 'search'),
+    within: queryParam(event, 'within'),
+  };
+}
+
+/** Accept a JSON array of master subnets, or CSV from the importer. */
+function parseMasterImport(event: APIGatewayProxyEventV2): MasterSubnetInput[] {
+  const contentType =
+    event.headers?.['content-type'] ?? event.headers?.['Content-Type'] ?? '';
+
+  if (contentType.includes('text/csv')) {
+    const raw = event.isBase64Encoded
+      ? Buffer.from(event.body ?? '', 'base64').toString('utf8')
+      : (event.body ?? '');
+
+    return parseCsv(raw).map((record) => {
+      // Accept either a single CIDR column or the spreadsheet's
+      // "CLOUD SPACE" + "MASK" pair.
+      const cidrDirect = pick(record, ['Master Subnet', 'CIDR', 'Subnet']);
+      const space = pick(record, ['CLOUD SPACE', 'CloudSpace', 'Network']);
+      const mask = pick(record, ['MASK', 'Mask', 'Prefix']);
+      const cidr =
+        cidrDirect ?? (space && mask ? `${space}/${String(mask).replace(/^\//, '')}` : space);
+
+      return {
+        name: pick(record, ['Name', 'COUNTRY', 'Country']),
+        cidr: cidr ?? '',
+        regionGroup: (pick(record, ['Region', 'Region Group']) ?? '') as
+          MasterSubnetInput['regionGroup'],
+        countryIso: pick(record, ['ISO', 'ISO Code']),
+        providerLocation: pick(record, [
+          'Provider / Location',
+          'Provider',
+          'Cloud',
+          'Environment',
+        ]) as MasterSubnetInput['providerLocation'],
+        description: pick(record, ['Description']),
+        remarks: pick(record, ['Remarks', 'Notes']),
+        attributes: {},
+      } as MasterSubnetInput;
+    });
+  }
+
+  const body = parseBody<MasterSubnetInput[] | { rows: MasterSubnetInput[] }>(event);
+  const rows = Array.isArray(body) ? body : body.rows;
+  if (!Array.isArray(rows)) {
+    throw new HttpError(400, 'Expected a JSON array of rows, or {"rows": [...]}.');
+  }
+  return rows;
+}
+
+/* -------------------------------------------------------------------------- */
+/* /child-subnets                                                             */
+/* -------------------------------------------------------------------------- */
+
+async function routeChildren(
+  event: APIGatewayProxyEventV2,
+  method: string,
+  segments: string[],
+  user: AuthenticatedUser,
+): Promise<APIGatewayProxyResultV2> {
+  const sub = segments[1];
+  const action = segments[2];
+
+  if (method === 'GET' && sub === 'export') {
+    const rows = await children.listChildren(readChildFilters(event));
+    return text(
+      200,
+      toCsv(rows as unknown as Record<string, unknown>[], [
+        { key: 'cidr', header: 'Child Subnet' },
+        { key: 'name', header: 'Name' },
+        { key: 'masterCidr', header: 'Master Subnet' },
+        { key: 'regionGroup', header: 'Region' },
+        { key: 'countryIso', header: 'ISO' },
+        { key: 'countryName', header: 'Country' },
+        { key: 'status', header: 'Status' },
+        { key: 'environment', header: 'Environment' },
+        { key: 'providerLocation', header: 'Provider / Location' },
+        { key: 'requestorName', header: 'Requestor Name' },
+        { key: 'requestDate', header: 'Request Date' },
+        { key: 'allocatedDate', header: 'Allocated Date' },
+        { key: 'technicalOwner', header: 'Technical Owner' },
+        { key: 'justification', header: 'Justification / Purpose' },
+        { key: 'totalAddresses', header: 'Total Addresses' },
+        { key: 'usableHosts', header: 'Usable Hosts' },
+        { key: 'remarks', header: 'Remarks' },
+      ]),
+      'text/csv; charset=utf-8',
+      'child-subnets.csv',
+    );
+  }
+
+  if (method === 'GET' && sub === 'overlaps') {
+    const cidr = queryParam(event, 'cidr');
+    if (!cidr) throw new HttpError(400, 'Query parameter "cidr" is required.');
+    return ok(
+      await children.findOverlappingChildren(cidr, queryParam(event, 'excludeId')),
+    );
+  }
+
+  if (!sub) {
+    if (method === 'GET') {
+      return ok(await children.listChildren(readChildFilters(event)));
+    }
+    if (method === 'POST') {
+      const body = parseBody<ChildSubnetInput>(event);
+      body.attributes = await customFields.sanitiseAttributes(
+        'child_subnet',
+        body.attributes,
+      );
+      // createChild performs the country-scoped check via its master.
+      return created(await children.createChild(body, user));
+    }
+  } else if (action === 'release' && method === 'POST') {
+    return ok(await children.releaseChild(sub, user));
+  } else if (!action) {
+    if (method === 'GET') return ok(await children.getChild(sub));
+    if (method === 'PUT' || method === 'PATCH') {
+      const body = parseBody<ChildSubnetInput>(event);
+      body.attributes = await customFields.sanitiseAttributes(
+        'child_subnet',
+        body.attributes,
+      );
+      return ok(await children.updateChild(sub, body, user));
+    }
+    if (method === 'DELETE') {
+      await children.deleteChild(sub, user);
+      return noContent();
+    }
+  }
+
+  return json(405, { error: `Method ${method} not allowed on /child-subnets.` });
+}
+
+function readChildFilters(
+  event: APIGatewayProxyEventV2,
+): children.ChildFilters {
+  return {
+    masterSubnetId: queryParam(event, 'masterSubnetId'),
+    regionGroup: queryParam(event, 'regionGroup'),
+    countryIso: queryParam(event, 'countryIso'),
+    status: queryParam(event, 'status'),
+    environment: queryParam(event, 'environment'),
+    providerLocation: queryParam(event, 'providerLocation'),
+    technicalOwner: queryParam(event, 'technicalOwner'),
+    requestorName: queryParam(event, 'requestorName'),
+    search: queryParam(event, 'search'),
+    within: queryParam(event, 'within'),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* /custom-fields                                                             */
+/* -------------------------------------------------------------------------- */
+
+async function routeCustomFields(
+  event: APIGatewayProxyEventV2,
+  method: string,
+  segments: string[],
+  user: AuthenticatedUser,
+): Promise<APIGatewayProxyResultV2> {
+  const id = segments[1];
+
+  if (!id) {
+    if (method === 'GET') {
+      // Every authenticated user needs the definitions to render the grids.
+      return ok(
+        await customFields.listCustomFields(
+          queryParam(event, 'entity'),
+          queryParam(event, 'includeInactive') === 'true',
+        ),
+      );
+    }
+    if (method === 'POST') {
+      requireAdmin(user);
+      const body = parseBody<CustomFieldInput>(event);
+      return created(await customFields.createCustomField(body, user.email));
+    }
+  } else {
+    if (method === 'GET') return ok(await customFields.getCustomField(id));
+    if (method === 'PUT' || method === 'PATCH') {
+      requireAdmin(user);
+      const body = parseBody<CustomFieldInput>(event);
+      return ok(await customFields.updateCustomField(id, body, user.email));
+    }
+    if (method === 'DELETE') {
+      requireAdmin(user);
+      await customFields.deleteCustomField(id, user.email);
+      return noContent();
+    }
+  }
+
+  return json(405, { error: `Method ${method} not allowed on /custom-fields.` });
+}
+
+/* -------------------------------------------------------------------------- */
+/* /country-owners                                                            */
+/* -------------------------------------------------------------------------- */
+
+async function routeCountryOwners(
+  event: APIGatewayProxyEventV2,
+  method: string,
+  segments: string[],
+  user: AuthenticatedUser,
+): Promise<APIGatewayProxyResultV2> {
+  const id = segments[1];
+  requireAdmin(user);
+
+  if (!id) {
+    if (method === 'GET') {
+      if (queryParam(event, 'summary') === 'true') {
+        return ok(await owners.summariseOwners());
+      }
+      return ok(
+        await owners.listCountryOwners(
+          queryParam(event, 'userEmail'),
+          queryParam(event, 'countryIso'),
+        ),
+      );
+    }
+    if (method === 'POST') {
+      const body = parseBody<CountryOwnerInput>(event);
+      return created(await owners.createCountryOwner(body, user.email));
+    }
+    if (method === 'PUT') {
+      // Replace one user's complete set of countries.
+      const body = parseBody<{ userEmail: string; countries: string[] }>(event);
+      if (!Array.isArray(body.countries)) {
+        throw new HttpError(400, 'countries must be an array of ISO codes.');
+      }
+      return ok(
+        await owners.setCountryOwnerships(
+          body.userEmail,
+          body.countries,
+          user.email,
+        ),
+      );
+    }
+  } else if (method === 'DELETE') {
+    await owners.deleteCountryOwner(id, user.email);
+    return noContent();
+  }
+
+  return json(405, { error: `Method ${method} not allowed on /country-owners.` });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -267,54 +624,67 @@ async function routeSubscriptions(
   event: APIGatewayProxyEventV2,
   method: string,
   segments: string[],
-  actor: string,
-  user: User,
+  user: AuthenticatedUser,
 ): Promise<APIGatewayProxyResultV2> {
   const sub = segments[1];
 
   if (method === 'GET' && sub === 'export') {
-    const rows = await subscriptions.listSubscriptions(readSubscriptionFilters(event));
-    const csv = toCsv(rows as unknown as Record<string, unknown>[], [
-      { key: 'portalType', header: 'Portal' },
-      { key: 'subscription', header: 'Subscription' },
-      { key: 'addressSpace', header: 'Address Space' },
-      { key: 'cidr', header: 'CIDR' },
-      { key: 'regionGroup', header: 'Region' },
-      { key: 'remarks', header: 'Remarks' },
-    ]);
-    return text(200, csv, 'text/csv; charset=utf-8', 'azure-subscriptions.csv');
+    const rows = await subscriptions.listSubscriptions(
+      readSubscriptionFilters(event),
+    );
+    return text(
+      200,
+      toCsv(rows as unknown as Record<string, unknown>[], [
+        { key: 'portalType', header: 'Portal' },
+        { key: 'subscription', header: 'Subscription' },
+        { key: 'addressSpace', header: 'Address Space' },
+        { key: 'cidr', header: 'CIDR' },
+        { key: 'regionGroup', header: 'Region' },
+        { key: 'remarks', header: 'Remarks' },
+      ]),
+      'text/csv; charset=utf-8',
+      'azure-subscriptions.csv',
+    );
   }
 
   if (method === 'POST' && sub === 'import') {
-    requireEditor(user);
-    const inputs = parseSubscriptionImport(event);
-    if (inputs.length === 0) {
-      throw new HttpError(400, 'No rows found in the import payload.');
+    requireGlobalAuthor(user);
+    const rows = parseSubscriptionImport(event);
+    if (rows.length === 0) throw new HttpError(400, 'No rows found to import.');
+    const result = await subscriptions.bulkUpsertSubscriptions(rows, user.email);
+    return ok({ ...result, total: rows.length });
+  }
+
+  if (!sub) {
+    if (method === 'GET') {
+      return ok(
+        await subscriptions.listSubscriptions(readSubscriptionFilters(event)),
+      );
     }
-    const result = await subscriptions.bulkUpsertSubscriptions(inputs, actor);
-    return ok({ ...result, total: inputs.length });
-  }
-
-  if (method === 'GET' && !sub) {
-    return ok(await subscriptions.listSubscriptions(readSubscriptionFilters(event)));
-  }
-
-  if (method === 'POST' && !sub) {
-    requireEditor(user);
-    const body = parseBody<AzureSubscriptionInput>(event);
-    return created(await subscriptions.createSubscription(body, actor));
-  }
-
-  if (sub) {
+    if (method === 'POST') {
+      requireGlobalAuthor(user);
+      return created(
+        await subscriptions.createSubscription(
+          parseBody<AzureSubscriptionInput>(event),
+          user.email,
+        ),
+      );
+    }
+  } else {
     if (method === 'GET') return ok(await subscriptions.getSubscription(sub));
     if (method === 'PUT' || method === 'PATCH') {
-      requireEditor(user);
-      const body = parseBody<AzureSubscriptionInput>(event);
-      return ok(await subscriptions.updateSubscription(sub, body, actor));
+      requireGlobalAuthor(user);
+      return ok(
+        await subscriptions.updateSubscription(
+          sub,
+          parseBody<AzureSubscriptionInput>(event),
+          user.email,
+        ),
+      );
     }
     if (method === 'DELETE') {
-      requireEditor(user);
-      await subscriptions.deleteSubscription(sub, actor);
+      requireGlobalAuthor(user);
+      await subscriptions.deleteSubscription(sub, user.email);
       return noContent();
     }
   }
@@ -352,7 +722,7 @@ function parseSubscriptionImport(
       if (!portalType) {
         throw new HttpError(
           400,
-          'Each CSV row needs a Portal value, or pass ?portalType=... on the request.',
+          'Each row needs a Portal value, or pass ?portalType=... on the request.',
         );
       }
       return {
@@ -367,9 +737,9 @@ function parseSubscriptionImport(
     });
   }
 
-  const body = parseBody<AzureSubscriptionInput[] | { rows: AzureSubscriptionInput[] }>(
-    event,
-  );
+  const body = parseBody<
+    AzureSubscriptionInput[] | { rows: AzureSubscriptionInput[] }
+  >(event);
   const rows = Array.isArray(body) ? body : body.rows;
   if (!Array.isArray(rows)) {
     throw new HttpError(400, 'Expected a JSON array of rows, or {"rows": [...]}.');
@@ -385,8 +755,7 @@ async function routePlan(
   event: APIGatewayProxyEventV2,
   method: string,
   segments: string[],
-  actor: string,
-  user: User,
+  user: AuthenticatedUser,
 ): Promise<APIGatewayProxyResultV2> {
   const sub = segments[1];
 
@@ -395,53 +764,63 @@ async function routePlan(
       search: queryParam(event, 'search'),
       within: queryParam(event, 'within'),
     });
-    const csv = toCsv(rows as unknown as Record<string, unknown>[], [
-      { key: 'subnet16', header: '/16 SUBNETS' },
-      { key: 'agg14', header: '/14 255.252.0.0' },
-      { key: 'agg12', header: '/12 255.240.0.0' },
-      { key: 'allocation', header: 'Allocation' },
-      { key: 'remarks', header: 'Remarks' },
-      { key: 'currentUsage', header: 'Current usage' },
-      { key: 'change', header: 'Change' },
-    ]);
-    return text(200, csv, 'text/csv; charset=utf-8', 'subnet-plan.csv');
-  }
-
-  if (method === 'POST' && sub === 'import') {
-    requireEditor(user);
-    const inputs = parsePlanImport(event);
-    if (inputs.length === 0) {
-      throw new HttpError(400, 'No rows found in the import payload.');
-    }
-    const result = await plan.bulkUpsertPlanEntries(inputs, actor);
-    return ok({ ...result, total: inputs.length });
-  }
-
-  if (method === 'GET' && !sub) {
-    return ok(
-      await plan.listPlanEntries({
-        search: queryParam(event, 'search'),
-        within: queryParam(event, 'within'),
-      }),
+    return text(
+      200,
+      toCsv(rows as unknown as Record<string, unknown>[], [
+        { key: 'subnet16', header: '/16 SUBNETS' },
+        { key: 'agg14', header: '/14 255.252.0.0' },
+        { key: 'agg12', header: '/12 255.240.0.0' },
+        { key: 'allocation', header: 'Allocation' },
+        { key: 'remarks', header: 'Remarks' },
+        { key: 'currentUsage', header: 'Current usage' },
+        { key: 'change', header: 'Change' },
+      ]),
+      'text/csv; charset=utf-8',
+      'subnet-plan.csv',
     );
   }
 
-  if (method === 'POST' && !sub) {
-    requireEditor(user);
-    const body = parseBody<SubnetPlanEntryInput>(event);
-    return created(await plan.createPlanEntry(body, actor));
+  if (method === 'POST' && sub === 'import') {
+    requireGlobalAuthor(user);
+    const rows = parsePlanImport(event);
+    if (rows.length === 0) throw new HttpError(400, 'No rows found to import.');
+    const result = await plan.bulkUpsertPlanEntries(rows, user.email);
+    return ok({ ...result, total: rows.length });
   }
 
-  if (sub) {
+  if (!sub) {
+    if (method === 'GET') {
+      return ok(
+        await plan.listPlanEntries({
+          search: queryParam(event, 'search'),
+          within: queryParam(event, 'within'),
+        }),
+      );
+    }
+    if (method === 'POST') {
+      requireGlobalAuthor(user);
+      return created(
+        await plan.createPlanEntry(
+          parseBody<SubnetPlanEntryInput>(event),
+          user.email,
+        ),
+      );
+    }
+  } else {
     if (method === 'GET') return ok(await plan.getPlanEntry(sub));
     if (method === 'PUT' || method === 'PATCH') {
-      requireEditor(user);
-      const body = parseBody<SubnetPlanEntryInput>(event);
-      return ok(await plan.updatePlanEntry(sub, body, actor));
+      requireGlobalAuthor(user);
+      return ok(
+        await plan.updatePlanEntry(
+          sub,
+          parseBody<SubnetPlanEntryInput>(event),
+          user.email,
+        ),
+      );
     }
     if (method === 'DELETE') {
-      requireEditor(user);
-      await plan.deletePlanEntry(sub, actor);
+      requireGlobalAuthor(user);
+      await plan.deletePlanEntry(sub, user.email);
       return noContent();
     }
   }
@@ -457,7 +836,6 @@ function parsePlanImport(event: APIGatewayProxyEventV2): SubnetPlanEntryInput[] 
     const raw = event.isBase64Encoded
       ? Buffer.from(event.body ?? '', 'base64').toString('utf8')
       : (event.body ?? '');
-
     return parseCsv(raw).map((record) => ({
       subnet16: pick(record, ['/16 SUBNETS', '16 SUBNETS', 'subnet16', '/16']),
       agg14: pick(record, ['/14 255.252.0.0', '/14', 'agg14']),

@@ -1,12 +1,22 @@
 import { useState } from 'react';
 import { Modal } from './Modal';
 
+/** Shape returned by the various import endpoints. */
+export interface ImportOutcome {
+  total: number;
+  inserted?: number;
+  updated?: number;
+  skipped?: number;
+  /** Per-row reasons for rows that could not be stored. */
+  errors?: string[];
+}
+
 interface ImportDialogProps {
   title: string;
   /** Column headers the importer understands, shown as guidance. */
   expectedHeaders: string[];
   onClose: () => void;
-  onImport: (csv: string) => Promise<{ inserted?: number; updated?: number; total: number }>;
+  onImport: (csv: string) => Promise<ImportOutcome>;
 }
 
 /**
@@ -22,7 +32,7 @@ export function ImportDialog({
   const [csv, setCsv] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
+  const [result, setResult] = useState<ImportOutcome | null>(null);
 
   async function handleFile(file: File) {
     setCsv(await file.text());
@@ -38,18 +48,27 @@ export function ImportDialog({
     setError(null);
     setResult(null);
     try {
-      const r = await onImport(csv);
-      const parts = [`${r.total} row(s) processed`];
-      if (r.inserted !== undefined) parts.push(`${r.inserted} added`);
-      if (r.updated !== undefined) parts.push(`${r.updated} updated`);
-      setResult(parts.join(' · '));
-      setCsv('');
+      const outcome = await onImport(csv);
+      setResult(outcome);
+      // Keep the input when rows were skipped so it can be corrected and retried.
+      if (!outcome.skipped) setCsv('');
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setBusy(false);
     }
   }
+
+  const summary = result
+    ? [
+        `${result.total} row(s) submitted`,
+        result.inserted !== undefined ? `${result.inserted} added` : null,
+        result.updated !== undefined ? `${result.updated} updated` : null,
+        result.skipped ? `${result.skipped} skipped` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : null;
 
   return (
     <Modal
@@ -77,7 +96,22 @@ export function ImportDialog({
           {error}
         </div>
       )}
-      {result && <div className="banner-success">{result}</div>}
+
+      {result && (
+        <div className={result.skipped ? 'banner-error' : 'banner-success'}>
+          <div>{summary}</div>
+          {result.errors && result.errors.length > 0 && (
+            <ul style={{ margin: '8px 0 0', paddingLeft: 18, fontSize: 12 }}>
+              {result.errors.slice(0, 15).map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+              {result.errors.length > 15 && (
+                <li>…and {result.errors.length - 15} more.</li>
+              )}
+            </ul>
+          )}
+        </div>
+      )}
 
       <div className="field">
         <label htmlFor="csv-file">CSV file</label>
