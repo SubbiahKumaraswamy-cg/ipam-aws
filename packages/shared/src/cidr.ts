@@ -224,3 +224,157 @@ export function formatPercent(fraction: number | null): string {
 export function isValidCidr(value: string | null | undefined): boolean {
   return parseCidr(value) !== null;
 }
+
+
+/* -------------------------------------------------------------------------- */
+/* Capacity planning within a master subnet                                   */
+/* -------------------------------------------------------------------------- */
+
+/** Usable host addresses in a block (total minus network and broadcast). */
+export function usableHosts(cidr: string | null | undefined): number {
+  const parsed = parseCidr(cidr ?? undefined);
+  if (!parsed) return 0;
+  return parsed.usableAddresses;
+}
+
+/** An inclusive range of 32-bit address values. */
+export interface AddressRange {
+  start: number;
+  end: number;
+}
+
+/** Convert a CIDR into an inclusive numeric range. */
+export function cidrToRange(cidr: string): AddressRange | null {
+  const parsed = parseCidr(cidr);
+  if (!parsed) return null;
+  const start = ipToInt(parsed.network);
+  if (start === null) return null;
+  return { start, end: start + parsed.totalAddresses - 1 };
+}
+
+/** Sort and coalesce overlapping/adjacent ranges. */
+export function mergeRanges(ranges: AddressRange[]): AddressRange[] {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  const merged: AddressRange[] = [{ ...sorted[0] }];
+
+  for (const range of sorted.slice(1)) {
+    const last = merged[merged.length - 1];
+    // Merge when overlapping or directly adjacent.
+    if (range.start <= last.end + 1) {
+      last.end = Math.max(last.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+/**
+ * Free gaps inside a master subnet, given the blocks already in use.
+ *
+ * Used ranges outside the master are ignored, and any that straddle its
+ * boundary are clipped to it.
+ */
+export function freeRanges(
+  masterCidr: string,
+  usedCidrs: (string | null | undefined)[],
+): AddressRange[] {
+  const master = cidrToRange(masterCidr);
+  if (!master) return [];
+
+  const used = mergeRanges(
+    usedCidrs
+      .map((c) => (c ? cidrToRange(c) : null))
+      .filter((r): r is AddressRange => r !== null)
+      .filter((r) => r.end >= master.start && r.start <= master.end)
+      .map((r) => ({
+        start: Math.max(r.start, master.start),
+        end: Math.min(r.end, master.end),
+      })),
+  );
+
+  const gaps: AddressRange[] = [];
+  let cursor = master.start;
+
+  for (const range of used) {
+    if (range.start > cursor) {
+      gaps.push({ start: cursor, end: range.start - 1 });
+    }
+    cursor = Math.max(cursor, range.end + 1);
+  }
+  if (cursor <= master.end) {
+    gaps.push({ start: cursor, end: master.end });
+  }
+  return gaps;
+}
+
+/** Total number of free addresses inside a master subnet. */
+export function freeAddressCount(
+  masterCidr: string,
+  usedCidrs: (string | null | undefined)[],
+): number {
+  return freeRanges(masterCidr, usedCidrs).reduce(
+    (sum, gap) => sum + (gap.end - gap.start + 1),
+    0,
+  );
+}
+
+/**
+ * Suggest the lowest correctly-aligned free block of the requested prefix
+ * length inside a master subnet, or null when none is available.
+ *
+ * Subnets must start on an absolute multiple of their size, so a gap is only
+ * usable if it contains such a boundary with room to spare. Walking the gaps
+ * keeps this O(n log n) in the number of existing allocations rather than
+ * iterating over candidate addresses.
+ */
+export function suggestNextSubnet(
+  masterCidr: string,
+  usedCidrs: (string | null | undefined)[],
+  prefix: number,
+): string | null {
+  const master = parseCidr(masterCidr);
+  if (!master) return null;
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  // A child can never be larger than its master.
+  if (prefix < master.prefix) return null;
+
+  const size = 2 ** (32 - prefix);
+
+  for (const gap of freeRanges(masterCidr, usedCidrs)) {
+    // Round the gap start up to the next multiple of the block size.
+    const candidate = Math.ceil(gap.start / size) * size;
+    if (candidate + size - 1 <= gap.end) {
+      return `${intToIp(candidate)}/${prefix}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Largest prefix length (smallest block) that still fits in a master subnet,
+ * useful for telling a requester what is actually available.
+ * Returns null when nothing is free.
+ */
+export function largestFreeBlockPrefix(
+  masterCidr: string,
+  usedCidrs: (string | null | undefined)[],
+): number | null {
+  const master = parseCidr(masterCidr);
+  if (!master) return null;
+
+  for (let prefix = master.prefix; prefix <= 32; prefix++) {
+    if (suggestNextSubnet(masterCidr, usedCidrs, prefix)) return prefix;
+  }
+  return null;
+}
+
+/** Format an address count compactly, e.g. 1048576 -> "1.0M". */
+export function formatAddressCount(value: number): string {
+  if (!Number.isFinite(value)) return '—';
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}

@@ -1,13 +1,21 @@
 /**
  * Typed client for the IPAM REST API.
  *
- * The access token is supplied by a getter so the client always sends the
- * current (possibly silently refreshed) token from the OIDC session.
+ * The ID token is supplied by a getter so every request carries the current
+ * (possibly silently refreshed) token from the OIDC session.
  */
 
 import type {
-  CloudAllocation,
-  CloudAllocationInput,
+  Country,
+  CountryInput,
+  MasterSubnet,
+  MasterSubnetInput,
+  ChildSubnet,
+  ChildSubnetInput,
+  CustomField,
+  CustomFieldInput,
+  CountryOwner,
+  CountryOwnerInput,
   AzureSubscription,
   AzureSubscriptionInput,
   SubnetPlanEntry,
@@ -35,10 +43,7 @@ export function setTokenGetter(fn: () => string | undefined): void {
   tokenGetter = fn;
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { apiBaseUrl } = getConfig();
   const token = tokenGetter();
 
@@ -65,7 +70,7 @@ async function request<T>(
         if (raw) message = raw;
       }
     } catch {
-      // Keep the default message.
+      /* keep the default message */
     }
     throw new ApiError(response.status, message);
   }
@@ -76,10 +81,7 @@ async function request<T>(
   return (await response.text()) as unknown as T;
 }
 
-/**
- * Build a query string from defined, non-empty values. Accepts any object so
- * callers can pass typed filter interfaces directly.
- */
+/** Build a query string from defined, non-empty values. */
 function qs(params: object): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -91,46 +93,186 @@ function qs(params: object): string {
   return str ? `?${str}` : '';
 }
 
-export interface AllocationQuery {
-  environment?: string;
+export interface MasterQuery {
   regionGroup?: string;
-  status?: string;
-  iso?: string;
+  countryIso?: string;
+  providerLocation?: string;
   search?: string;
   within?: string;
 }
 
+export interface ChildQuery {
+  masterSubnetId?: string;
+  regionGroup?: string;
+  countryIso?: string;
+  status?: string;
+  environment?: string;
+  providerLocation?: string;
+  technicalOwner?: string;
+  requestorName?: string;
+  search?: string;
+  within?: string;
+}
+
+export interface FreeSpaceReport {
+  masterId: string;
+  masterCidr: string;
+  prefix: number | null;
+  suggestion: string | null;
+  largestAvailablePrefix: number | null;
+  usedCidrs: string[];
+}
+
 export const api = {
   me: () => request<AuthenticatedUser>('/me'),
-
   dashboard: () => request<DashboardSummary>('/dashboard'),
 
-  listAllocations: (query: AllocationQuery = {}) =>
-    request<CloudAllocation[]>(`/allocations${qs(query)}`),
+  /* ----------------------------- countries ----------------------------- */
 
-  createAllocation: (input: CloudAllocationInput) =>
-    request<CloudAllocation>('/allocations', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
+  listCountries: (query: { regionGroup?: string; search?: string; activeOnly?: string } = {}) =>
+    request<Country[]>(`/countries${qs(query)}`),
 
-  updateAllocation: (id: string, input: CloudAllocationInput) =>
-    request<CloudAllocation>(`/allocations/${id}`, {
+  createCountry: (input: CountryInput) =>
+    request<Country>('/countries', { method: 'POST', body: JSON.stringify(input) }),
+
+  updateCountry: (iso: string, input: CountryInput) =>
+    request<Country>(`/countries/${iso}`, {
       method: 'PUT',
       body: JSON.stringify(input),
     }),
 
-  deleteAllocation: (id: string) =>
-    request<void>(`/allocations/${id}`, { method: 'DELETE' }),
+  deleteCountry: (iso: string) =>
+    request<void>(`/countries/${iso}`, { method: 'DELETE' }),
 
-  findOverlaps: (cidr: string, excludeId?: string) =>
-    request<CloudAllocation[]>(`/allocations/overlaps${qs({ cidr, excludeId })}`),
-
-  importAllocationsCsv: (csv: string, environment?: string) =>
+  importCountriesCsv: (csv: string) =>
     request<{ inserted: number; updated: number; total: number }>(
-      `/allocations/import${qs({ environment })}`,
+      '/countries/import',
       { method: 'POST', body: csv, headers: { 'content-type': 'text/csv' } },
     ),
+
+  /* --------------------------- master subnets -------------------------- */
+
+  listMasters: (query: MasterQuery = {}) =>
+    request<MasterSubnet[]>(`/master-subnets${qs(query)}`),
+
+  getMaster: (id: string) => request<MasterSubnet>(`/master-subnets/${id}`),
+
+  createMaster: (input: MasterSubnetInput) =>
+    request<MasterSubnet>('/master-subnets', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  updateMaster: (id: string, input: MasterSubnetInput) =>
+    request<MasterSubnet>(`/master-subnets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+
+  deleteMaster: (id: string) =>
+    request<void>(`/master-subnets/${id}`, { method: 'DELETE' }),
+
+  importMastersCsv: (csv: string) =>
+    request<{
+      inserted: number;
+      updated: number;
+      skipped: number;
+      total: number;
+      errors: string[];
+    }>('/master-subnets/import', {
+      method: 'POST',
+      body: csv,
+      headers: { 'content-type': 'text/csv' },
+    }),
+
+  masterOverlaps: (cidr: string, excludeId?: string) =>
+    request<MasterSubnet[]>(`/master-subnets/overlaps${qs({ cidr, excludeId })}`),
+
+  freeSpace: (masterId: string, prefix?: number) =>
+    request<FreeSpaceReport>(
+      `/master-subnets/${masterId}/free-space${qs({ prefix })}`,
+    ),
+
+  masterChildren: (masterId: string) =>
+    request<ChildSubnet[]>(`/master-subnets/${masterId}/children`),
+
+  /* ---------------------------- child subnets -------------------------- */
+
+  listChildren: (query: ChildQuery = {}) =>
+    request<ChildSubnet[]>(`/child-subnets${qs(query)}`),
+
+  createChild: (input: ChildSubnetInput) =>
+    request<ChildSubnet>('/child-subnets', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  updateChild: (id: string, input: ChildSubnetInput) =>
+    request<ChildSubnet>(`/child-subnets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+
+  deleteChild: (id: string) =>
+    request<void>(`/child-subnets/${id}`, { method: 'DELETE' }),
+
+  releaseChild: (id: string) =>
+    request<ChildSubnet>(`/child-subnets/${id}/release`, { method: 'POST' }),
+
+  childOverlaps: (cidr: string, excludeId?: string) =>
+    request<ChildSubnet[]>(`/child-subnets/overlaps${qs({ cidr, excludeId })}`),
+
+  /* ---------------------------- custom fields -------------------------- */
+
+  listCustomFields: (entity?: string, includeInactive = false) =>
+    request<CustomField[]>(
+      `/custom-fields${qs({
+        entity,
+        includeInactive: includeInactive ? 'true' : undefined,
+      })}`,
+    ),
+
+  createCustomField: (input: CustomFieldInput) =>
+    request<CustomField>('/custom-fields', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  updateCustomField: (id: string, input: CustomFieldInput) =>
+    request<CustomField>(`/custom-fields/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+
+  deleteCustomField: (id: string) =>
+    request<void>(`/custom-fields/${id}`, { method: 'DELETE' }),
+
+  /* --------------------------- country owners -------------------------- */
+
+  listCountryOwners: (query: { userEmail?: string; countryIso?: string } = {}) =>
+    request<CountryOwner[]>(`/country-owners${qs(query)}`),
+
+  ownerSummary: () =>
+    request<{ userEmail: string; countries: string[] }[]>(
+      '/country-owners?summary=true',
+    ),
+
+  createCountryOwner: (input: CountryOwnerInput) =>
+    request<CountryOwner>('/country-owners', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  setCountryOwnerships: (userEmail: string, countries: string[]) =>
+    request<CountryOwner[]>('/country-owners', {
+      method: 'PUT',
+      body: JSON.stringify({ userEmail, countries }),
+    }),
+
+  deleteCountryOwner: (id: string) =>
+    request<void>(`/country-owners/${id}`, { method: 'DELETE' }),
+
+  /* ------------------------- retained reference ------------------------ */
 
   listSubscriptions: (query: { portalType?: string; search?: string } = {}) =>
     request<AzureSubscription[]>(`/azure-subscriptions${qs(query)}`),
@@ -186,8 +328,8 @@ export const api = {
 };
 
 /**
- * Trigger a CSV download for the given export endpoint. Uses fetch (rather
- * than a plain link) so the Authorization header is included.
+ * Trigger a CSV download. Uses fetch rather than a plain link so the
+ * Authorization header is included.
  */
 export async function downloadCsv(
   path: string,

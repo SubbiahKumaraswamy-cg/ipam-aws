@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   BarChart,
   Bar,
@@ -13,37 +14,34 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import type { DashboardSummary } from '@ipam/shared';
-import { REGION_GROUP_LABELS } from '@ipam/shared';
+import {
+  REGION_GROUP_LABELS,
+  formatAddressCount,
+  formatPercent,
+} from '@ipam/shared';
 import { api } from '../api';
 
 const STATUS_COLOURS: Record<string, string> = {
-  Available: '#98a2b3',
+  Reserved: '#b26a00',
   Allocated: '#1d4ed8',
-  Assigned: '#b26a00',
-  Used: '#1b7f4b',
+  Released: '#98a2b3',
 };
 
 const ENV_COLOURS: Record<string, string> = {
-  AWS: '#ff9900',
-  Azure: '#0078d4',
+  Prod: '#c62828',
+  UAT: '#b26a00',
+  Dev: '#1d4ed8',
+  Test: '#1b7f4b',
 };
 
-/** Format large address counts compactly, e.g. 1048576 -> "1.0M". */
-function formatCount(value: number): string {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return String(value);
-}
-
 export function DashboardPage() {
+  const navigate = useNavigate();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     api
       .dashboard()
       .then((data) => {
@@ -78,22 +76,18 @@ export function DashboardPage() {
 
   if (!summary) return null;
 
+  const overall =
+    summary.totalAddresses > 0
+      ? summary.allocatedAddresses / summary.totalAddresses
+      : 0;
+
   const regionData = summary.byRegion.map((r) => ({
     name: r.regionGroup,
     label: REGION_GROUP_LABELS[r.regionGroup] ?? r.regionGroup,
-    allocations: r.count,
-    addresses: r.addresses,
-  }));
-
-  const envData = summary.byEnvironment.map((e) => ({
-    name: e.environment,
-    allocations: e.count,
-    addresses: e.addresses,
-  }));
-
-  const statusData = summary.byStatus.map((s) => ({
-    name: s.status,
-    value: s.count,
+    masters: r.masterSubnets,
+    children: r.childSubnets,
+    allocated: r.allocatedAddresses,
+    available: r.availableAddresses,
   }));
 
   return (
@@ -102,133 +96,138 @@ export function DashboardPage() {
         <div>
           <h2>Dashboard</h2>
           <p>
-            Address space allocated to markets across AWS and Azure, by region
-            grouping and lifecycle status.
+            Address space across all regions. Allocated and available figures are
+            derived from the child subnets, so they always reconcile.
           </p>
         </div>
       </div>
 
       <div className="stat-grid">
         <div className="stat">
-          <div className="stat-label">Total allocations</div>
-          <div className="stat-value">{summary.totalAllocations}</div>
-          <div className="stat-hint">rows across AWS &amp; Azure</div>
+          <div className="stat-label">Master subnets</div>
+          <div className="stat-value">{summary.masterSubnets}</div>
+          <div className="stat-hint">across {summary.countries} countries</div>
+        </div>
+        <div className="stat">
+          <div className="stat-label">Child subnets</div>
+          <div className="stat-value">{summary.childSubnets}</div>
+          <div className="stat-hint">individual allocations</div>
         </div>
         <div className="stat">
           <div className="stat-label">Addresses allocated</div>
-          <div className="stat-value">{formatCount(summary.totalAddresses)}</div>
+          <div className="stat-value">
+            {formatAddressCount(summary.allocatedAddresses)}
+          </div>
           <div className="stat-hint">
-            {summary.totalAddresses.toLocaleString()} IPv4 addresses
+            of {formatAddressCount(summary.totalAddresses)} ·{' '}
+            {formatPercent(overall)}
           </div>
         </div>
         <div className="stat">
-          <div className="stat-label">Azure subscriptions</div>
-          <div className="stat-value">{summary.azureSubscriptions}</div>
-          <div className="stat-hint">Classic + ARM portals</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Subnet plan entries</div>
-          <div className="stat-value">{summary.subnetPlanEntries}</div>
-          <div className="stat-hint">/12 → /14 → /16 hierarchy</div>
+          <div className="stat-label">Addresses available</div>
+          <div className="stat-value">
+            {formatAddressCount(summary.availableAddresses)}
+          </div>
+          <div className="stat-hint">
+            {summary.availableAddresses.toLocaleString()} free
+          </div>
         </div>
       </div>
 
       <div className="chart-grid">
         <div className="card">
-          <h3>Allocations by region grouping</h3>
+          <h3>Address space by region</h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={regionData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#eef1f6" />
+              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={formatAddressCount} tick={{ fontSize: 11 }} />
+              <Tooltip
+                formatter={(value: number, key: string) => [
+                  value.toLocaleString(),
+                  key === 'allocated' ? 'Allocated' : 'Available',
+                ]}
+              />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar
+                dataKey="allocated"
+                name="Allocated"
+                stackId="a"
+                fill="#1d4ed8"
+              />
+              <Bar
+                dataKey="available"
+                name="Available"
+                stackId="a"
+                fill="#cdd7ea"
+                radius={[3, 3, 0, 0]}
+              />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="card">
+          <h3>Subnets by region</h3>
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={regionData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#eef1f6" />
               <XAxis dataKey="name" tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip
-                formatter={(value: number, key: string) =>
-                  key === 'addresses'
-                    ? [value.toLocaleString(), 'Addresses']
-                    : [value, 'Allocations']
-                }
-              />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar
-                dataKey="allocations"
-                name="Allocations"
-                fill="#1d4ed8"
-                radius={[3, 3, 0, 0]}
-              />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        <div className="card">
-          <h3>Address space by region grouping</h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={regionData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#eef1f6" />
-              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-              <YAxis tickFormatter={formatCount} tick={{ fontSize: 11 }} />
-              <Tooltip
-                formatter={(value: number) => [
-                  value.toLocaleString(),
-                  'IPv4 addresses',
-                ]}
-              />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar
-                dataKey="addresses"
-                name="IPv4 addresses"
-                fill="#0078d4"
-                radius={[3, 3, 0, 0]}
-              />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        <div className="card">
-          <h3>Allocations by cloud</h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <PieChart>
-              <Pie
-                data={envData}
-                dataKey="allocations"
-                nameKey="name"
-                innerRadius={60}
-                outerRadius={100}
-                paddingAngle={2}
-                label={(entry: { name?: string; allocations?: number }) =>
-                  `${entry.name}: ${entry.allocations}`
-                }
-              >
-                {envData.map((entry) => (
-                  <Cell
-                    key={entry.name}
-                    fill={ENV_COLOURS[entry.name] ?? '#98a2b3'}
-                  />
-                ))}
-              </Pie>
               <Tooltip />
-            </PieChart>
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="masters" name="Master subnets" fill="#0078d4" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="children" name="Child subnets" fill="#1b7f4b" radius={[3, 3, 0, 0]} />
+            </BarChart>
           </ResponsiveContainer>
         </div>
 
         <div className="card">
-          <h3>Lifecycle status</h3>
+          <h3>Allocation status</h3>
           <ResponsiveContainer width="100%" height={280}>
             <PieChart>
               <Pie
-                data={statusData}
+                data={summary.byStatus.map((s) => ({ name: s.status, value: s.count }))}
                 dataKey="value"
                 nameKey="name"
                 innerRadius={60}
                 outerRadius={100}
                 paddingAngle={2}
-                label={(entry: { name?: string; value?: number }) =>
-                  `${entry.name}: ${entry.value}`
+                label={(e: { name?: string; value?: number }) =>
+                  `${e.name}: ${e.value}`
                 }
               >
-                {statusData.map((entry) => (
+                {summary.byStatus.map((s) => (
+                  <Cell key={s.status} fill={STATUS_COLOURS[s.status] ?? '#98a2b3'} />
+                ))}
+              </Pie>
+              <Tooltip />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="card">
+          <h3>Active subnets by environment</h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <PieChart>
+              <Pie
+                data={summary.byEnvironment.map((e) => ({
+                  name: e.environment ?? 'Unspecified',
+                  value: e.count,
+                }))}
+                dataKey="value"
+                nameKey="name"
+                innerRadius={60}
+                outerRadius={100}
+                paddingAngle={2}
+                label={(e: { name?: string; value?: number }) =>
+                  `${e.name}: ${e.value}`
+                }
+              >
+                {summary.byEnvironment.map((e) => (
                   <Cell
-                    key={entry.name}
-                    fill={STATUS_COLOURS[entry.name] ?? '#98a2b3'}
+                    key={e.environment ?? 'none'}
+                    fill={ENV_COLOURS[e.environment ?? ''] ?? '#98a2b3'}
                   />
                 ))}
               </Pie>
@@ -238,16 +237,77 @@ export function DashboardPage() {
           </ResponsiveContainer>
         </div>
       </div>
+
+      {summary.mostUtilised.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>Master subnets closest to exhaustion</h3>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Master subnet</th>
+                <th>Country</th>
+                <th>Region</th>
+                <th>Utilisation</th>
+                <th>Available</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {summary.mostUtilised.map((m) => {
+                const tone =
+                  m.utilisation >= 0.9
+                    ? 'high'
+                    : m.utilisation >= 0.7
+                      ? 'medium'
+                      : 'low';
+                return (
+                  <tr key={m.id}>
+                    <td>
+                      <code>{m.cidr}</code>
+                      {m.name && <div className="muted" style={{ fontSize: 11 }}>{m.name}</div>}
+                    </td>
+                    <td>{m.countryName ?? <span className="muted">—</span>}</td>
+                    <td className="muted">{m.regionGroup}</td>
+                    <td style={{ width: 180 }}>
+                      <div className="meter">
+                        <div
+                          className={`meter-fill meter-${tone}`}
+                          style={{ width: `${Math.round(m.utilisation * 100)}%` }}
+                        />
+                        <span className="meter-label">
+                          {formatPercent(m.utilisation)}
+                        </span>
+                      </div>
+                    </td>
+                    <td>{m.availableAddresses.toLocaleString()}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        onClick={() => navigate(`/child-subnets?master=${m.id}`)}
+                      >
+                        View children
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>Region breakdown</h3>
         <table className="table">
           <thead>
             <tr>
-              <th>Region grouping</th>
+              <th>Region</th>
               <th>Description</th>
-              <th>Allocations</th>
-              <th>IPv4 addresses</th>
+              <th>Masters</th>
+              <th>Children</th>
+              <th>Allocated</th>
+              <th>Available</th>
             </tr>
           </thead>
           <tbody>
@@ -257,14 +317,17 @@ export function DashboardPage() {
                   <strong>{r.name}</strong>
                 </td>
                 <td className="muted">{r.label}</td>
-                <td>{r.allocations}</td>
-                <td>{r.addresses.toLocaleString()}</td>
+                <td>{r.masters}</td>
+                <td>{r.children}</td>
+                <td>{r.allocated.toLocaleString()}</td>
+                <td>{r.available.toLocaleString()}</td>
               </tr>
             ))}
             {regionData.length === 0 && (
               <tr>
-                <td colSpan={4} className="muted">
-                  No allocations yet — import your spreadsheet to get started.
+                <td colSpan={6} className="muted">
+                  No master subnets yet — add countries, then master subnets, to
+                  begin.
                 </td>
               </tr>
             )}

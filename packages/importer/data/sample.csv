@@ -1,8 +1,8 @@
-Environment,Region,ISO,COUNTRY,CLOUD SPACE,MASK,Current Range,Status,Remarks
-AWS,EUROPE,DE,Germany,10.20.0.0,/16,10.20.0.0/24,Used,Primary landing zone
-AWS,EUROPE,FR,France,10.21.0.0,255.255.0.0,,Allocated,
-AWS,CAMEAT,AE,United Arab Emirates,10.30.0.0,/16,,Allocated,
-AWS,ASIA,SG,Singapore,10.40.0.0,/16,10.40.0.0/22,Used,
-AWS,LATAM,BR,Brazil,10.50.0.0,/16,,Allocated,
-Azure,AMERICA,US,United States,10.60.0.0,/14,,Allocated,
-Azure,COMPASS GROUP,GL,Global Shared Services,10.70.0.0,/16,10.70.0.0/20,Used,Shared platform
+Master Subnet,Name,Region,ISO,Provider / Location,Description,Remarks
+10.20.0.0/16,Germany,EUROPE,DE,AWS,Primary landing zone,
+10.21.0.0/16,France,EUROPE,FR,AWS,,
+10.30.0.0/16,United Arab Emirates,CAMEAT,AE,Azure,,
+10.40.0.0/16,Singapore,APAC,SG,AWS,,
+10.50.0.0/16,Brazil,LATAM,BR,AWS,,
+10.60.0.0/14,United States,NORTH AMERICA,US,Azure,,
+10.70.0.0/16,Global shared services,GROUP,,Azure,Group-level shared space,Editable by Author/Admin only

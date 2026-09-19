@@ -1,24 +1,21 @@
 #!/usr/bin/env node
 /**
- * CLI for importing the IP address allocation workbook.
+ * CLI for importing the IP address allocation workbook into Cloud IPAM.
  *
  * Usage
  *   ipam-import <workbook.xlsx> [options]
  *
  * Options
- *   --out <dir>          Write CSV files ready for the app's Import button.
- *   --json <dir>         Write raw JSON payloads.
- *   --api <url>          Push directly to the IPAM API.
- *   --token <jwt>        Cognito ID token (required with --api).
- *   --default-status <s> Force a status instead of deriving it.
- *   --dry-run            Report what was found without writing anything.
- *   --quiet              Suppress the per-warning listing.
+ *   --out <dir>    Write CSV files ready for the app's Import buttons.
+ *   --json <dir>   Write raw JSON payloads.
+ *   --api <url>    Push directly to the IPAM API.
+ *   --token <jwt>  Cognito ID token (required with --api).
+ *   --dry-run      Report what was found without writing anything.
+ *   --quiet        Suppress the per-warning listing.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { AllocationStatus } from '@ipam/shared';
-import { ALLOCATION_STATUSES } from '@ipam/shared';
 import { parseWorkbook, type ParseResult } from './parse';
 
 interface Args {
@@ -27,7 +24,6 @@ interface Args {
   json?: string;
   api?: string;
   token?: string;
-  defaultStatus?: AllocationStatus;
   dryRun: boolean;
   quiet: boolean;
 }
@@ -56,16 +52,6 @@ function parseArgs(argv: string[]): Args {
       case '--token':
         args.token = next();
         break;
-      case '--default-status': {
-        const value = next() as AllocationStatus;
-        if (!ALLOCATION_STATUSES.includes(value)) {
-          throw new Error(
-            `--default-status must be one of ${ALLOCATION_STATUSES.join(', ')}.`,
-          );
-        }
-        args.defaultStatus = value;
-        break;
-      }
       case '--dry-run':
         args.dryRun = true;
         break;
@@ -101,23 +87,22 @@ Import the IP address allocation workbook into Cloud IPAM.
   ipam-import <workbook.xlsx> [options]
 
 Options
-  --out <dir>            Write CSV files for the app's Import button
-  --json <dir>           Write raw JSON payloads
-  --api <url>            Push directly to the IPAM API
-  --token <jwt>          Cognito ID token (required with --api)
-  --default-status <s>   One of: ${ALLOCATION_STATUSES.join(', ')}
-  --dry-run              Report findings without writing
-  --quiet                Suppress per-warning output
+  --out <dir>      Write CSV files for the app's Import buttons
+  --json <dir>     Write raw JSON payloads
+  --api <url>      Push directly to the IPAM API
+  --token <jwt>    Cognito ID token (required with --api)
+  --dry-run        Report findings without writing
+  --quiet          Suppress per-warning output
 
 Examples
   # Inspect the workbook first
-  ipam-import "IP address allocation.xlsx" --dry-run
+  ipam-import "IPAM-Solution-Cloud-data.xlsx" --dry-run
 
   # Produce CSVs to upload through the UI
-  ipam-import "IP address allocation.xlsx" --out ./out
+  ipam-import "IPAM-Solution-Cloud-data.xlsx" --out ./out
 
   # Load straight into a deployed environment
-  ipam-import "IP address allocation.xlsx" \\
+  ipam-import "IPAM-Solution-Cloud-data.xlsx" \\
     --api https://abc.execute-api.eu-west-1.amazonaws.com --token "$ID_TOKEN"
 `);
 }
@@ -143,66 +128,65 @@ function writeCsvFiles(result: ParseResult, dir: string): string[] {
   mkdirSync(dir, { recursive: true });
   const written: string[] = [];
 
-  for (const environment of ['AWS', 'Azure'] as const) {
-    const rows = result.allocations.filter((a) => a.environment === environment);
-    if (rows.length === 0) continue;
-    const file = join(dir, `${environment.toLowerCase()}-allocations.csv`);
-    writeFileSync(
-      file,
-      toCsv(rows as unknown as Record<string, unknown>[], [
-        { key: 'environment', header: 'Environment' },
-        { key: 'regionGroup', header: 'Region' },
-        { key: 'iso', header: 'ISO' },
-        { key: 'country', header: 'COUNTRY' },
-        { key: 'cloudSpace', header: 'CLOUD SPACE' },
-        { key: 'mask', header: 'MASK' },
-        { key: 'currentRange', header: 'Current Range' },
-        { key: 'status', header: 'Status' },
-        { key: 'remarks', header: 'Remarks' },
-      ]),
-      'utf8',
-    );
+  const write = (
+    name: string,
+    rows: Record<string, unknown>[],
+    columns: { key: string; header: string }[],
+  ) => {
+    if (rows.length === 0) return;
+    const file = join(dir, name);
+    writeFileSync(file, toCsv(rows, columns), 'utf8');
     written.push(file);
-  }
+  };
 
-  if (result.subscriptions.length > 0) {
-    const file = join(dir, 'azure-subscriptions.csv');
-    writeFileSync(
-      file,
-      toCsv(result.subscriptions as unknown as Record<string, unknown>[], [
-        { key: 'portalType', header: 'Portal' },
-        { key: 'subscription', header: 'Subscription' },
-        { key: 'addressSpace', header: 'Address Space' },
-        { key: 'regionGroup', header: 'Region' },
-        { key: 'remarks', header: 'Remarks' },
-      ]),
-      'utf8',
-    );
-    written.push(file);
-  }
+  write('countries.csv', result.countries as unknown as Record<string, unknown>[], [
+    { key: 'iso', header: 'ISO' },
+    { key: 'name', header: 'Country' },
+    { key: 'regionGroup', header: 'Region' },
+    { key: 'active', header: 'Active' },
+    { key: 'remarks', header: 'Remarks' },
+  ]);
 
-  if (result.planEntries.length > 0) {
-    const file = join(dir, 'subnet-plan.csv');
-    writeFileSync(
-      file,
-      toCsv(result.planEntries as unknown as Record<string, unknown>[], [
-        { key: 'subnet16', header: '/16 SUBNETS' },
-        { key: 'agg14', header: '/14 255.252.0.0' },
-        { key: 'agg12', header: '/12 255.240.0.0' },
-        { key: 'allocation', header: 'Allocation' },
-        { key: 'remarks', header: 'Remarks' },
-        { key: 'currentUsage', header: 'Current usage' },
-        { key: 'change', header: 'Change' },
-      ]),
-      'utf8',
-    );
-    written.push(file);
-  }
+  write('master-subnets.csv', result.masters as unknown as Record<string, unknown>[], [
+    { key: 'cidr', header: 'Master Subnet' },
+    { key: 'name', header: 'Name' },
+    { key: 'regionGroup', header: 'Region' },
+    { key: 'countryIso', header: 'ISO' },
+    { key: 'providerLocation', header: 'Provider / Location' },
+    { key: 'description', header: 'Description' },
+    { key: 'remarks', header: 'Remarks' },
+  ]);
+
+  write(
+    'azure-subscriptions.csv',
+    result.subscriptions as unknown as Record<string, unknown>[],
+    [
+      { key: 'portalType', header: 'Portal' },
+      { key: 'subscription', header: 'Subscription' },
+      { key: 'addressSpace', header: 'Address Space' },
+      { key: 'regionGroup', header: 'Region' },
+      { key: 'remarks', header: 'Remarks' },
+    ],
+  );
+
+  write('subnet-plan.csv', result.planEntries as unknown as Record<string, unknown>[], [
+    { key: 'subnet16', header: '/16 SUBNETS' },
+    { key: 'agg14', header: '/14 255.252.0.0' },
+    { key: 'agg12', header: '/12 255.240.0.0' },
+    { key: 'allocation', header: 'Allocation' },
+    { key: 'remarks', header: 'Remarks' },
+    { key: 'currentUsage', header: 'Current usage' },
+    { key: 'change', header: 'Change' },
+  ]);
 
   return written;
 }
 
-/** Push parsed data to a deployed API. */
+/**
+ * Push parsed data to a deployed API.
+ *
+ * Countries go first because master subnets reference them.
+ */
 async function pushToApi(
   result: ParseResult,
   baseUrl: string,
@@ -222,11 +206,33 @@ async function pushToApi(
     if (!response.ok) {
       throw new Error(`POST ${path} failed (${response.status}): ${text}`);
     }
-    console.log(`  POST ${path} → ${text}`);
+    console.log(`  POST ${path}`);
+    // Surface per-row skips reported by the master-subnet importer.
+    try {
+      const parsed = JSON.parse(text) as {
+        inserted?: number;
+        updated?: number;
+        skipped?: number;
+        total?: number;
+        errors?: string[];
+      };
+      const parts: string[] = [];
+      if (parsed.total !== undefined) parts.push(`${parsed.total} submitted`);
+      if (parsed.inserted !== undefined) parts.push(`${parsed.inserted} added`);
+      if (parsed.updated !== undefined) parts.push(`${parsed.updated} updated`);
+      if (parsed.skipped) parts.push(`${parsed.skipped} skipped`);
+      console.log(`    ${parts.join(' · ')}`);
+      for (const message of parsed.errors ?? []) {
+        console.log(`    ! ${message}`);
+      }
+    } catch {
+      console.log(`    ${text}`);
+    }
   };
 
   console.log(`\nUploading to ${baseUrl} …`);
-  await post('/allocations/import', result.allocations);
+  await post('/countries/import', result.countries);
+  await post('/master-subnets/import', result.masters);
   await post('/azure-subscriptions/import', result.subscriptions);
   await post('/subnet-plan/import', result.planEntries);
 }
@@ -236,45 +242,43 @@ async function main(): Promise<void> {
   const file = resolve(args.file);
 
   console.log(`Reading ${file} …\n`);
-  const result = await parseWorkbook(file, {
-    defaultStatus: args.defaultStatus,
-  });
+  const result = await parseWorkbook(file);
 
-  // Per-sheet report.
   console.log('Sheet summary');
   console.log('─'.repeat(78));
   console.log(
     'SHEET'.padEnd(24) +
-      'DETECTED AS'.padEnd(30) +
-      'ALLOC'.padStart(7) +
+      'DETECTED AS'.padEnd(34) +
+      'MASTERS'.padStart(8) +
       'SUBS'.padStart(6) +
       'PLAN'.padStart(6),
   );
   for (const sheet of result.sheets) {
     console.log(
       sheet.name.slice(0, 23).padEnd(24) +
-        sheet.kind.slice(0, 29).padEnd(30) +
-        String(sheet.allocations).padStart(7) +
+        sheet.kind.slice(0, 33).padEnd(34) +
+        String(sheet.masters).padStart(8) +
         String(sheet.subscriptions).padStart(6) +
         String(sheet.planEntries).padStart(6),
     );
   }
   console.log('─'.repeat(78));
   console.log(
-    'TOTAL'.padEnd(54) +
-      String(result.allocations.length).padStart(7) +
+    'TOTAL'.padEnd(58) +
+      String(result.masters.length).padStart(8) +
       String(result.subscriptions.length).padStart(6) +
       String(result.planEntries.length).padStart(6),
   );
+  console.log(`\n${result.countries.length} distinct country/countries found.`);
 
-  // Region breakdown, which is the quickest way to spot a missed block.
+  // Region breakdown is the quickest way to spot a missed block.
   const byRegion = new Map<string, number>();
-  for (const a of result.allocations) {
-    const key = `${a.environment} / ${a.regionGroup}`;
+  for (const m of result.masters) {
+    const key = `${m.providerLocation ?? 'unknown'} / ${m.regionGroup}`;
     byRegion.set(key, (byRegion.get(key) ?? 0) + 1);
   }
   if (byRegion.size > 0) {
-    console.log('\nAllocations by cloud and region');
+    console.log('\nMaster subnets by provider and region');
     for (const [key, count] of [...byRegion.entries()].sort()) {
       console.log(`  ${key.padEnd(34)} ${String(count).padStart(5)}`);
     }
@@ -300,8 +304,12 @@ async function main(): Promise<void> {
   if (args.json) {
     mkdirSync(args.json, { recursive: true });
     writeFileSync(
-      join(args.json, 'allocations.json'),
-      JSON.stringify(result.allocations, null, 2),
+      join(args.json, 'countries.json'),
+      JSON.stringify(result.countries, null, 2),
+    );
+    writeFileSync(
+      join(args.json, 'master-subnets.json'),
+      JSON.stringify(result.masters, null, 2),
     );
     writeFileSync(
       join(args.json, 'azure-subscriptions.json'),
@@ -317,9 +325,10 @@ async function main(): Promise<void> {
   if (args.out) {
     const written = writeCsvFiles(result, args.out);
     console.log(`\nCSV written to ${resolve(args.out)}:`);
-    for (const file of written) console.log(`  ${file}`);
+    for (const f of written) console.log(`  ${f}`);
     console.log(
-      '\nUpload these with the "Import CSV" button on the matching page.',
+      '\nUpload countries.csv first (Countries page), then master-subnets.csv ' +
+        '(Master subnets page), since subnets reference countries.',
     );
   }
 
@@ -330,7 +339,7 @@ async function main(): Promise<void> {
 
   if (!args.out && !args.json && !args.api) {
     console.log(
-      '\nNothing written. Add --out <dir> to produce CSVs, --json <dir> for JSON, ' +
+      '\nNothing written. Add --out <dir> for CSVs, --json <dir> for JSON, ' +
         'or --api/--token to upload.',
     );
   }

@@ -559,3 +559,185 @@ code {
   padding: 1px 4px;
   border-radius: 3px;
 }
+
+
+/* ------------------------------------------------- revised model additions -- */
+
+/* Role badges for the new role set. */
+.role-author {
+  background: #e7f6ed;
+  color: var(--success);
+}
+
+.role-countryowner {
+  background: #e7edfd;
+  color: var(--accent);
+}
+
+/* Subnet lifecycle pills. */
+.pill-reserved {
+  background: #fff8e6;
+  color: var(--warn);
+}
+
+.pill-released {
+  background: #eef1f6;
+  color: var(--text-muted);
+}
+
+/* Released allocations are de-emphasised in the grid. */
+.row-released {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* Utilisation meter used in grids and the dashboard. */
+.meter {
+  position: relative;
+  height: 18px;
+  background: #eef1f6;
+  border-radius: 9px;
+  overflow: hidden;
+  min-width: 90px;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: 9px 0 0 9px;
+  transition: width 0.2s ease;
+}
+
+.meter-low {
+  background: #7fa5ef;
+}
+
+.meter-medium {
+  background: #e0a33a;
+}
+
+.meter-high {
+  background: #d9635e;
+}
+
+.meter-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Summary figures in a page header. */
+.head-stats {
+  display: flex;
+  gap: 18px;
+  font-size: 12px;
+  color: var(--text-muted);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.head-stats strong {
+  color: var(--text);
+  font-size: 15px;
+  display: block;
+}
+
+/* Inline row action buttons. */
+.row-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+  background: none;
+}
+
+.btn-link-danger {
+  color: var(--danger);
+  margin-left: 10px;
+}
+
+/* Tab strip on the admin page. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.tab {
+  padding: 8px 16px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Grouped form sections. */
+.fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 4px;
+  margin: 0 0 14px;
+}
+
+.fieldset legend {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 0 6px;
+}
+
+/* Multi-select country picker. */
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+}
+
+.checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.checkbox-item input {
+  cursor: pointer;
+}

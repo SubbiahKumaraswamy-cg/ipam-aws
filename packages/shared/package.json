@@ -8,5 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  },
   "license": "UNLICENSED"
 }
